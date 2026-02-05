@@ -1,6 +1,6 @@
-# Expert Iteration RL in Pure JAX
+# Expert Iteration RL with Gumbel MuZero in JAX
 
-**AlphaZero-style training without self-play.** This repo implements Expert Iteration—using MCTS as a "teacher" to generate improved policy targets, then distilling that knowledge into a neural network. We apply it to Jumanji's 3D BinPack environment and achieve **96% volume utilization** vs PPO's 90%.
+**AlphaZero-style training for single-agent planning.** This repo combines [Expert Iteration](https://arxiv.org/abs/1705.08439) with [Gumbel MuZero](https://openreview.net/forum?id=bERaNdoegnO)—using Gumbel MCTS as the "expert" that generates policy improvement targets, then distilling them into a neural network. Applied to Jumanji's 3D BinPack environment, we achieve **96% volume utilization** vs PPO's 90%.
 
 **[Read the full blog post](https://aneeshers.github.io/mctx_knapsack/)** for a deeper dive into the theory and implementation details.
 
@@ -9,6 +9,8 @@
 ## Why Expert Iteration?
 
 Traditional AlphaZero uses self-play because Go and Chess are two-player games. But 3D bin packing is a **single-agent planning task**—there's no opponent. So instead of self-play, we use MCTS to generate training targets directly:
+
+> **Note:** This isn't vanilla Expert Iteration. We use **Gumbel MuZero** as the expert, which provides stronger policy improvement guarantees for large action spaces with limited simulation budgets. The `action_weights` from mctx aren't visit count proportions (like in the original EXIT paper); they're computed as `softmax(prior_logits + completed_Q)`, directly implementing the policy improvement operator from [Danihelka et al. (2022)](https://openreview.net/forum?id=bERaNdoegnO).
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -26,11 +28,11 @@ Traditional AlphaZero uses self-play because Go and Chess are two-player games. 
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-The key insight: we have **perfect environment dynamics** for bin packing. MCTS can simulate exact state transitions, so it acts as a strong "expert" that teaches the network. This is fundamentally different from model-based RL where you'd need to learn the dynamics.
+We actually have **perfect environment dynamics** for bin packing, so MCTS can simulate exact state transitions, and it can act as a strong "expert" that teaches the network. This is fundamentally different from model-based RL where you'd need to learn the dynamics.
 
 ## Results
 
-Expert Iteration significantly outperforms PPO on BinPack-v2:
+Expert Iteration outperforms PPO on BinPack-v2:
 
 ![PPO vs Expert Iteration](ppo_vs_alphazero.gif)
 
@@ -172,6 +174,18 @@ mcts_policy = policy_output.action_weights
 
 We use `gumbel_muzero_policy` rather than vanilla MCTS because it handles large action spaces better with small simulation budgets (see [Danihelka et al., 2022](https://openreview.net/forum?id=bERaNdoegnO)).
 
+### Gumbel MuZero vs Traditional MCTS
+
+This distinction matters for understanding what we're training on:
+
+| Aspect | Traditional EXIT (Anthony et al.) | This Implementation |
+|--------|-----------------------------------|---------------------|
+| Policy target | `n(s,a) / n(s)` (visit counts) | `softmax(prior + Q)` (policy improvement) |
+| Root exploration | UCT + Dirichlet noise | Gumbel-Top-k + Sequential Halving |
+| Theoretical guarantee | Asymptotic (infinite simulations) | Finite-sample policy improvement |
+
+The original [Expert Iteration paper](https://arxiv.org/abs/1705.08439) uses visit count proportions as targets—the idea being that MCTS visits better actions more often. Gumbel MuZero instead computes targets by *directly applying a policy improvement operator*: it adds the completed Q-values to the prior logits and takes a softmax. This provides stronger guarantees when simulation budgets are small relative to the action space (like our 800 actions with 32 simulations).
+
 ### Neural Network Architecture
 
 The policy-value network uses a Transformer encoder with cross-attention between EMS and item tokens:
@@ -290,6 +304,44 @@ config = ckpt["config"]
 iteration = ckpt["iteration"]
 ```
 
+## Evaluating a Trained Model
+
+```python
+import jax
+import jumanji
+import pickle
+
+# Load checkpoint
+with open("checkpoint.pkl", "rb") as f:
+    ckpt = pickle.load(f)
+
+params, net_state = ckpt["model"]
+env = jumanji.make("BinPack-v2")
+
+# Run greedy evaluation
+def evaluate(params, net_state, rng_key, num_episodes=100):
+    returns = []
+    for i in range(num_episodes):
+        rng_key, reset_key = jax.random.split(rng_key)
+        state, timestep = env.reset(reset_key)
+        total_return = 0.0
+        
+        while timestep.discount > 0:
+            obs = jax.tree_map(lambda x: x[None], timestep.observation)  # Add batch dim
+            (logits, _), _ = forward.apply(params, net_state, obs)
+            action = jnp.argmax(logits[0])  # Greedy
+            action_pair = unflatten_action(action[None])[0]
+            state, timestep = env.step(state, action_pair)
+            total_return += float(timestep.reward)
+        
+        returns.append(total_return)
+    
+    return np.mean(returns), np.std(returns)
+
+mean, std = evaluate(params, net_state, jax.random.PRNGKey(0))
+print(f"Volume utilization: {mean:.1%} ± {std:.1%}")
+```
+
 ## Key Implementation Details
 
 ### Action Masking
@@ -343,11 +395,11 @@ model = jax.device_put_replicated(model, devices)
 ## References
 
 **Blog Post:**
-- [Expert Iteration for 3D Bin Packing](https://aneeshers.github.io/mctx_knapsack/) — Full writeup with theory and implementation details
+- [Expert Iteration with Gumbel MuZero for 3D Bin Packing](https://aneeshers.github.io/mctx_knapsack/) — Full writeup with theory and implementation details
 
 **Papers:**
-- [Expert Iteration (Anthony et al., 2017)](https://arxiv.org/abs/1705.08439) — The core algorithm
-- [Gumbel MuZero (Danihelka et al., 2022)](https://openreview.net/forum?id=bERaNdoegnO) — Better MCTS for large action spaces
+- [Expert Iteration (Anthony et al., 2017)](https://arxiv.org/abs/1705.08439) — The MCTS-as-teacher framework we build on
+- [Gumbel MuZero (Danihelka et al., 2022)](https://openreview.net/forum?id=bERaNdoegnO) — Policy improvement via Gumbel-Top-k; how our expert computes targets
 - [PPO (Schulman et al., 2017)](https://arxiv.org/abs/1707.06347) — Baseline algorithm
 - [Jumanji (Bonnet et al., 2023)](https://arxiv.org/abs/2306.09884) — Environment suite
 
@@ -359,8 +411,8 @@ model = jax.device_put_replicated(model, devices)
 ## Citation
 
 ```bibtex
-@misc{muppidi2026expertiteration,
-  title={Expert Iteration for 3D Bin Packing},
+@misc{muppidi2026gumbelexit,
+  title={Expert Iteration with Gumbel MuZero},
   author={Muppidi, Aneesh},
   year={2026},
   url={https://github.com/Aneeshers/expert-iteration-rl}
