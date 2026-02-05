@@ -359,10 +359,10 @@ model = jax.device_put_replicated(model, devices)
 ## Citation
 
 ```bibtex
-@misc{muppidi2025expertiteration,
+@misc{muppidi2026expertiteration,
   title={Expert Iteration for 3D Bin Packing},
   author={Muppidi, Aneesh},
-  year={2025},
+  year={2026},
   url={https://github.com/Aneeshers/expert-iteration-rl}
 }
 ```
