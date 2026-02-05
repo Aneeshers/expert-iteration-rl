@@ -1,4 +1,4 @@
-# Expert Iteration for 3D Bin Packing
+# Expert Iteration RL in Pure JAX
 
 **AlphaZero-style training without self-play.** This repo implements Expert Iteration—using MCTS as a "teacher" to generate improved policy targets, then distilling that knowledge into a neural network. We apply it to Jumanji's 3D BinPack environment and achieve **96% volume utilization** vs PPO's 90%.
 
